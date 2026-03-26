@@ -658,9 +658,10 @@
   @media(max-width:420px){.kpi-grid{grid-template-columns:1fr;} .plan-cards-row{grid-template-columns:1fr 1fr;} .week-sel .wk-label{display:none;}}
 </style>
 
-<!-- Firebase Auth -->
+<!-- Firebase Auth + Firestore -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
@@ -1101,6 +1102,52 @@ const S = {
   ]
 };
 
+/* ─ Firestore save / load ─ */
+let _db = null;
+let _uid = null;
+
+function saveState() {
+  if (!_db || !_uid) return;
+  const data = {
+    totalBalance:     S.totalBalance,
+    usdtBalance:      S.usdtBalance,
+    deposits:         S.deposits.map(d => ({ id: d.id, date: d.date instanceof Date ? d.date.toISOString() : d.date, amount: d.amount })),
+    teamBonus:        S.teamBonus,
+    contestAmount:    S.contestAmount || 0,
+    vndRate:          S.vndRate,
+    weekNumber:       S.weekNumber,
+    weekStartDate:    S.weekStartDate instanceof Date ? S.weekStartDate.toISOString() : S.weekStartDate,
+    prevWeeklySalary: S.prevWeeklySalary,
+    weekHistory:      S.weekHistory,
+    monthHistory:     S.monthHistory,
+    plans:            S.plans,
+    updatedAt:        new Date().toISOString()
+  };
+  _db.collection('users').doc(_uid).set(data).catch(e => console.error('Save error:', e));
+}
+
+function loadState(callback) {
+  if (!_db || !_uid) { callback(); return; }
+  _db.collection('users').doc(_uid).get().then(doc => {
+    if (doc.exists) {
+      const d = doc.data();
+      S.totalBalance     = d.totalBalance     ?? 0;
+      S.usdtBalance      = d.usdtBalance      ?? 0;
+      S.teamBonus        = d.teamBonus        ?? false;
+      S.contestAmount    = d.contestAmount    ?? 0;
+      S.vndRate          = d.vndRate          ?? 0;
+      S.weekNumber       = d.weekNumber       ?? 1;
+      S.prevWeeklySalary = d.prevWeeklySalary ?? null;
+      S.weekHistory      = d.weekHistory      ?? [];
+      S.monthHistory     = d.monthHistory     ?? {};
+      S.plans            = d.plans            ?? S.plans;
+      S.weekStartDate    = d.weekStartDate    ? new Date(d.weekStartDate) : new Date();
+      S.deposits         = (d.deposits || []).map(dep => ({ ...dep, date: new Date(dep.date) }));
+    }
+    callback();
+  }).catch(e => { console.error('Load error:', e); callback(); });
+}
+
 /* ─ Helpers ─ */
 function totalDeposits() { return S.deposits.reduce((a,d)=>a+d.amount,0); }
 function currentPlan() {
@@ -1324,6 +1371,7 @@ function renderDepositsTable() {
 function deleteDeposit(id) {
   S.deposits = S.deposits.filter(d => d.id !== id);
   render();
+  saveState();
 }
 
 function renderWeekDiff(sal) {
@@ -1455,7 +1503,8 @@ window.addEventListener('DOMContentLoaded', () => {
       S.usdtBalance = Math.max(0, _balOp==='add' ? S.usdtBalance+v : S.usdtBalance-v);
     }
     closeOverlay('balanceModal');
-    doRender(); /* Fix 3: use doRender to sync animation cache and update main page */
+    doRender();
+    saveState();
   };
 
   /* ── QUICK DEPOSIT INLINE ── */
@@ -1467,6 +1516,7 @@ window.addEventListener('DOMContentLoaded', () => {
     input.value = '';
     input.focus();
     doRender();
+    saveState();
     // Clear _new flag after animation
     setTimeout(() => { S.deposits.forEach(d => delete d._new); }, 400);
   }
@@ -1479,7 +1529,8 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('teamBonusToggle').onclick = () => {
     const wasActive = S.teamBonus;
     S.teamBonus = !S.teamBonus;
-    doRender(); /* Fix 4: use doRender so animation cache stays in sync */
+    doRender();
+    saveState();
     if (!wasActive) {
       const tog = document.getElementById('teamBonusToggle');
       tog.classList.add('pulse-once');
@@ -1536,6 +1587,7 @@ window.addEventListener('DOMContentLoaded', () => {
     S.weekStartDate = new Date(now.getTime() + 86400000); // next day = start of next week
     S.weekNumber++;
     closeOverlay('weekReportModal');
+    saveState();
 
     /* Animation sequence */
     const salCard = document.getElementById('valWeeklySalary').closest('.kpi-card');
@@ -1561,6 +1613,7 @@ window.addEventListener('DOMContentLoaded', () => {
     input.value = '';
     input.focus();
     doRender();
+    saveState();
   }
   document.getElementById('modalClose').onclick   = () => closeOverlay('settingsModal');
   document.getElementById('modalCancel').onclick  = () => closeOverlay('settingsModal');
@@ -1592,6 +1645,7 @@ window.addEventListener('DOMContentLoaded', () => {
       else if (f==='pct') S.plans[i].pct=parseFloat(inp.value)||S.plans[i].pct;
     });
     render(); closeOverlay('settingsModal');
+    saveState();
   };
 
   /* ── PAST RECORD MODAL (Fix 6) ── */
@@ -1641,6 +1695,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
     closeOverlay('pastRecordModal');
     render();
+    saveState();
   };
 
   fetchVND();
@@ -1854,6 +1909,7 @@ window.addEventListener('DOMContentLoaded', () => {
     };
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const auth = firebase.auth();
+    _db = firebase.firestore();
     auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
 
     window.authLogin = function() {
@@ -1893,9 +1949,13 @@ window.addEventListener('DOMContentLoaded', () => {
 
     auth.onAuthStateChanged(function(user) {
       if (user) {
-        showDashboard();
-        if (typeof render === 'function') render();
+        _uid = user.uid;
+        loadState(() => {
+          showDashboard();
+          if (typeof render === 'function') render();
+        });
       } else {
+        _uid = null;
         showAuth();
         var bl = document.getElementById('btnLogin');
         var br = document.getElementById('btnRegister');
